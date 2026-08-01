@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import json
+import threading
 import pygame
 import tkinter as tk
 from PIL import ImageTk, Image
@@ -113,12 +114,13 @@ sound_put = safe_load_sound("put.mp3")
 sound_win = safe_load_sound("win.mp3")
 sound_lose = safe_load_sound("lose.mp3")
 
-# BGMの再生設定
+# BGMの再生設定(読み込みのみ、再生は後でtkinter変数初期化後に開始)
 bgm_path = os.path.join(SOUND_DIR, "bgm.mp3")
+bgm_loaded = False
 if os.path.exists(bgm_path):
     pygame.mixer.music.load(bgm_path)
     pygame.mixer.music.set_volume(0.2)
-    pygame.mixer.music.play(-1)
+    bgm_loaded = True
 
 # サウンド・アニメーション速度のグローバル変数（tkinter変数は後で初期化）
 sound_enabled_var = None
@@ -134,8 +136,10 @@ def play_sound(sound):
 
 def toggle_bgm():
     """サウンド設定に応じてBGMを再生/停止"""
-    global sound_enabled_var
+    global sound_enabled_var, bgm_loaded
     if sound_enabled_var is None:
+        return
+    if not bgm_loaded:
         return
     if sound_enabled_var.get():
         pygame.mixer.music.unpause()
@@ -494,6 +498,9 @@ def open_janken():
 # 盤面を初期化してゲーム開始
 def start_othello_game(first_player):
     othello.color = {YOU: YOUR_COLOR, COM: COM_COLOR}
+    # ゲーム開始時に難易度をスナップショット(ゲーム中の変更を防止)
+    othello.game_depth = difficulty_var.get() if difficulty_var is not None else DIFFICULTY_BEGINNER
+    set_difficulty_controls_state("disabled")
     othello.reset_game(first_player)
     if first_player == COM:
         window.after(500, othello.com)
@@ -514,6 +521,7 @@ class Othello:
         self.color = {YOU: YOUR_COLOR, COM: COM_COLOR}
         self._resize_after_id = None
         self._canvas_width = CANVAS_SIZE
+        self.game_depth = None
         self.canvas.bind("<Configure>", self._on_configure)
 
     # リサイズイベントハンドラ（デバウンス付き）
@@ -921,6 +929,9 @@ class Othello:
         elif winner == "COM":
             play_sound(sound_lose)
 
+        # ゲーム終了時に難易度ラジオボタンを再有効化
+        set_difficulty_controls_state("normal")
+
         # 勝敗表示
         msg = f"黒: {black}\n白: {white}\n\n結果: {winner}"
         tk.messagebox.showinfo("ゲーム終了", msg)
@@ -942,7 +953,7 @@ class Othello:
         self.master.after(10, lambda: self._com_compute(placable))
 
     def _com_compute(self, placable):
-        """minimax探索を実行し、最善手を打つ"""
+        """minimax探索を別スレッドで実行し、結果をメインスレッドに返す"""
         # 難易度に応じた探索深さと重みを選択
         depth = self.get_com_depth()
         weights = self.get_com_weights()
@@ -953,14 +964,24 @@ class Othello:
         # 盤面の色情報を取得
         board_colors = get_board_colors(self.board)
 
-        # Minimaxで最善手を探索
-        _, best_move = minimax(board_colors, depth, float('-inf'), float('inf'),
-                               True, com_color, you_color, weights)
+        def compute():
+            # バックグラウンドスレッドでminimax探索を実行
+            _, best_move = minimax(board_colors, depth, float('-inf'), float('inf'),
+                                   True, com_color, you_color, weights)
 
-        if best_move is None:
-            # フォールバック: ランダム選択
-            best_move = random.choice(placable)
+            if best_move is None:
+                best_move_final = random.choice(placable)
+            else:
+                best_move_final = best_move
 
+            # メインスレッドに結果を返す
+            self.master.after(0, lambda: self._com_apply_move(best_move_final))
+
+        thread = threading.Thread(target=compute, daemon=True)
+        thread.start()
+
+    def _com_apply_move(self, best_move):
+        """メインスレッドでCOMの手を盤面に反映する"""
         # 思考中表示を消す
         self.hide_thinking()
 
@@ -984,7 +1005,9 @@ class Othello:
         self.canvas.delete("thinking")
 
     def get_com_depth(self):
-        """現在の難易度に応じた探索深さを返す"""
+        """ゲーム開始時にスナップショットした探索深さを返す"""
+        if hasattr(self, 'game_depth') and self.game_depth is not None:
+            return self.game_depth
         global difficulty_var
         if difficulty_var is None:
             return DIFFICULTY_BEGINNER
@@ -992,11 +1015,8 @@ class Othello:
         return level
 
     def get_com_weights(self):
-        """現在の難易度に応じた重みテーブルを返す"""
-        global difficulty_var
-        if difficulty_var is None:
-            return DEFAULT_EVAL_WEIGHTS
-        level = difficulty_var.get()
+        """ゲーム開始時の難易度に応じた重みテーブルを返す"""
+        level = self.get_com_depth()
         if level == DIFFICULTY_ADVANCED:
             learned = load_learned_weights()
             if learned is not None:
@@ -1063,6 +1083,11 @@ def toggle_settings():
         settings_btn.config(text="\u2699")
         settings_visible.set(False)
     else:
+        # 相互排他: ヘルプが開いていたら閉じる
+        if help_visible.get():
+            help_frame.pack_forget()
+            help_btn.config(text="\u2753")
+            help_visible.set(False)
         settings_frame.pack(fill="x", after=top_frame)
         settings_btn.config(text="\u2699 \u25bc")
         settings_visible.set(True)
@@ -1077,12 +1102,22 @@ settings_inner.pack(fill="x", padx=10, pady=8)
 diff_frame = tk.Frame(settings_inner, bg="#f0f0f0")
 diff_frame.pack(fill="x", pady=2)
 tk.Label(diff_frame, text="COM\u30ec\u30d9\u30eb:", font=("Arial", 10), bg="#f0f0f0").pack(side="left")
-tk.Radiobutton(diff_frame, text="\u521d\u7d1a", variable=difficulty_var,
-               value=DIFFICULTY_BEGINNER, font=("Arial", 10), bg="#f0f0f0").pack(side="left", padx=5)
-tk.Radiobutton(diff_frame, text="\u4e2d\u7d1a", variable=difficulty_var,
-               value=DIFFICULTY_MEDIUM, font=("Arial", 10), bg="#f0f0f0").pack(side="left", padx=5)
-tk.Radiobutton(diff_frame, text="\u4e0a\u7d1a", variable=difficulty_var,
-               value=DIFFICULTY_ADVANCED, font=("Arial", 10), bg="#f0f0f0").pack(side="left", padx=5)
+diff_rb_beginner = tk.Radiobutton(diff_frame, text="\u521d\u7d1a", variable=difficulty_var,
+               value=DIFFICULTY_BEGINNER, font=("Arial", 10), bg="#f0f0f0")
+diff_rb_beginner.pack(side="left", padx=5)
+diff_rb_medium = tk.Radiobutton(diff_frame, text="\u4e2d\u7d1a", variable=difficulty_var,
+               value=DIFFICULTY_MEDIUM, font=("Arial", 10), bg="#f0f0f0")
+diff_rb_medium.pack(side="left", padx=5)
+diff_rb_advanced = tk.Radiobutton(diff_frame, text="\u4e0a\u7d1a", variable=difficulty_var,
+               value=DIFFICULTY_ADVANCED, font=("Arial", 10), bg="#f0f0f0")
+diff_rb_advanced.pack(side="left", padx=5)
+
+difficulty_radio_buttons = [diff_rb_beginner, diff_rb_medium, diff_rb_advanced]
+
+def set_difficulty_controls_state(state):
+    """難易度ラジオボタンの有効/無効を切り替える"""
+    for rb in difficulty_radio_buttons:
+        rb.config(state=state)
 
 # アニメーション速度設定
 anim_frame = tk.Frame(settings_inner, bg="#f0f0f0")
@@ -1098,9 +1133,20 @@ tk.Radiobutton(anim_frame, text="\u9045\u3044", variable=animation_speed_var,
 # サウンドON/OFF設定
 sound_frame = tk.Frame(settings_inner, bg="#f0f0f0")
 sound_frame.pack(fill="x", pady=2)
-tk.Checkbutton(sound_frame, text="\ud83d\udd0a \u30b5\u30a6\u30f3\u30c9 ON",
+
+sound_label_var = tk.StringVar(value="\ud83d\udd0a \u30b5\u30a6\u30f3\u30c9 ON")
+
+def on_sound_toggle():
+    """サウンドトグル時にラベル更新とBGM制御"""
+    if sound_enabled_var.get():
+        sound_label_var.set("\ud83d\udd0a \u30b5\u30a6\u30f3\u30c9 ON")
+    else:
+        sound_label_var.set("\ud83d\udd07 \u30b5\u30a6\u30f3\u30c9 OFF")
+    toggle_bgm()
+
+tk.Checkbutton(sound_frame, textvariable=sound_label_var,
                variable=sound_enabled_var, font=("Arial", 10), bg="#f0f0f0",
-               command=toggle_bgm).pack(side="left")
+               command=on_sound_toggle).pack(side="left")
 
 # === ヘルプパネル（折りたたみ式） ===
 help_frame = tk.Frame(window)
@@ -1126,6 +1172,11 @@ def toggle_help():
         help_btn.config(text="\u2753")
         help_visible.set(False)
     else:
+        # 相互排他: 設定パネルが開いていたら閉じる
+        if settings_visible.get():
+            settings_frame.pack_forget()
+            settings_btn.config(text="\u2699")
+            settings_visible.set(False)
         help_frame.pack(fill="x", after=top_frame)
         help_content.pack(fill="x", padx=10, pady=5)
         help_btn.config(text="\u2753 \u25bc")
@@ -1147,5 +1198,10 @@ stone_count_label.pack()
 
 othello = Othello(game_frame)
 othello.reset_game(YOU)
+
+# BGM再生開始(tkinter変数初期化後に開始し、ミュート状態を尊重)
+if bgm_loaded and sound_enabled_var.get():
+    pygame.mixer.music.play(-1)
+
 window.mainloop()
 pygame.mixer.quit()
