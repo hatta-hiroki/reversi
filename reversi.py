@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import json
+import threading
 import pygame
 import tkinter as tk
 from PIL import ImageTk, Image
@@ -65,6 +66,18 @@ DIFFICULTY_BEGINNER = 1   # 初級: depth=1
 DIFFICULTY_MEDIUM = 3     # 中級: depth=3
 DIFFICULTY_ADVANCED = 5   # 上級: depth=5
 
+# アニメーション速度設定
+ANIM_SPEED_FAST = 1
+ANIM_SPEED_NORMAL = 2
+ANIM_SPEED_SLOW = 3
+
+# アニメーション速度に対応するタイミング値 (step_ms, between_ms)
+ANIM_TIMING = {
+    ANIM_SPEED_FAST: (15, 60),
+    ANIM_SPEED_NORMAL: (30, 120),
+    ANIM_SPEED_SLOW: (60, 240),
+}
+
 #pygameのミキサーを初期化
 pygame.mixer.pre_init(44100, -16, 2, 512)
 pygame.mixer.init()
@@ -101,12 +114,37 @@ sound_put = safe_load_sound("put.mp3")
 sound_win = safe_load_sound("win.mp3")
 sound_lose = safe_load_sound("lose.mp3")
 
-# BGMの再生設定
+# BGMの再生設定(読み込みのみ、再生は後でtkinter変数初期化後に開始)
 bgm_path = os.path.join(SOUND_DIR, "bgm.mp3")
+bgm_loaded = False
 if os.path.exists(bgm_path):
     pygame.mixer.music.load(bgm_path)
     pygame.mixer.music.set_volume(0.2)
-    pygame.mixer.music.play(-1)
+    bgm_loaded = True
+
+# サウンド・アニメーション速度のグローバル変数（tkinter変数は後で初期化）
+sound_enabled_var = None
+animation_speed_var = None
+
+def play_sound(sound):
+    """サウンドが有効な場合のみ再生するヘルパー関数"""
+    global sound_enabled_var
+    if sound_enabled_var is not None and not sound_enabled_var.get():
+        return
+    if sound:
+        sound.play()
+
+def toggle_bgm():
+    """サウンド設定に応じてBGMを再生/停止"""
+    global sound_enabled_var, bgm_loaded
+    if sound_enabled_var is None:
+        return
+    if not bgm_loaded:
+        return
+    if sound_enabled_var.get():
+        pygame.mixer.music.unpause()
+    else:
+        pygame.mixer.music.pause()
 
 # ===== Minimax AI エンジン (GUIに依存しない純粋なロジック) =====
 
@@ -460,6 +498,9 @@ def open_janken():
 # 盤面を初期化してゲーム開始
 def start_othello_game(first_player):
     othello.color = {YOU: YOUR_COLOR, COM: COM_COLOR}
+    # ゲーム開始時に難易度をスナップショット(ゲーム中の変更を防止)
+    othello.game_depth = difficulty_var.get() if difficulty_var is not None else DIFFICULTY_BEGINNER
+    set_difficulty_controls_state("disabled")
     othello.reset_game(first_player)
     if first_player == COM:
         window.after(500, othello.com)
@@ -480,6 +521,7 @@ class Othello:
         self.color = {YOU: YOUR_COLOR, COM: COM_COLOR}
         self._resize_after_id = None
         self._canvas_width = CANVAS_SIZE
+        self.game_depth = None
         self.canvas.bind("<Configure>", self._on_configure)
 
     # リサイズイベントハンドラ（デバウンス付き）
@@ -601,6 +643,7 @@ class Othello:
         self.draw_placable()
         self.last_move = None
         self.canvas.bind("<ButtonPress>", self.click)
+        self.update_stone_count()
 
     def init_board(self):
         self.board = [[None] * NUM_SQUARE for _ in range(NUM_SQUARE)]
@@ -673,7 +716,8 @@ class Othello:
             self.canvas.itemconfig(disk_id, fill=new_color)
 
         if step < 10:
-            self.master.after(30,lambda: self.animate_flip(x, y, step + 1, new_color))
+            step_ms = self._get_anim_step_ms()
+            self.master.after(step_ms,lambda: self.animate_flip(x, y, step + 1, new_color))
 
     def animate_reverse_rotate(self, lst, index=0,flip_color=None, callback=None):
         if index >= len(lst):
@@ -683,7 +727,24 @@ class Othello:
 
         x, y = lst[index]
         self.animate_flip(x, y, new_color=flip_color)
-        self.master.after(120,lambda: self.animate_reverse_rotate(lst, index + 1,flip_color, callback))
+        between_ms = self._get_anim_between_ms()
+        self.master.after(between_ms,lambda: self.animate_reverse_rotate(lst, index + 1,flip_color, callback))
+
+    def _get_anim_step_ms(self):
+        """現在のアニメーション速度設定に応じたステップ間隔(ms)を返す"""
+        global animation_speed_var
+        if animation_speed_var is None:
+            return 30
+        speed = animation_speed_var.get()
+        return ANIM_TIMING.get(speed, ANIM_TIMING[ANIM_SPEED_NORMAL])[0]
+
+    def _get_anim_between_ms(self):
+        """現在のアニメーション速度設定に応じた石間隔(ms)を返す"""
+        global animation_speed_var
+        if animation_speed_var is None:
+            return 120
+        speed = animation_speed_var.get()
+        return ANIM_TIMING.get(speed, ANIM_TIMING[ANIM_SPEED_NORMAL])[1]
 
     # 挟まれてひっくり返せる石のリスト取得
     def get_reverse_list(self, x, y,player):
@@ -775,7 +836,7 @@ class Othello:
     def place(self, x, y):
         self.canvas.delete("guide")
         self.animating = True
-        if sound_put: sound_put.play()
+        play_sound(sound_put)
         reverse_list = self.get_reverse_list(x, y, self.player)
         self.last_move = (x, y)
         flip_color = self.color[self.player]
@@ -815,7 +876,18 @@ class Othello:
     # アニメーション終了後の状態チェック
     def after_animation(self):
         self.animating = False
+        self.update_stone_count()
         self.change_turn()
+
+    # 石数リアルタイム表示を更新
+    def update_stone_count(self):
+        """盤面の石数を集計して下部ラベルに反映"""
+        global stone_count_label
+        if not hasattr(self, 'board'):
+            return
+        black, white = self.count_stones()
+        if stone_count_label is not None:
+            stone_count_label.config(text=f"\u25cf {black}    \u25cb {white}")
 
     # パス時のメッセージ
     def show_pass(self, player):
@@ -853,9 +925,12 @@ class Othello:
 
         # 判定された結果に基づいて音を鳴らす
         if winner == "YOU":
-            if sound_win: sound_win.play()
+            play_sound(sound_win)
         elif winner == "COM":
-            if sound_lose: sound_lose.play()
+            play_sound(sound_lose)
+
+        # ゲーム終了時に難易度ラジオボタンを再有効化
+        set_difficulty_controls_state("normal")
 
         # 勝敗表示
         msg = f"黒: {black}\n白: {white}\n\n結果: {winner}"
@@ -872,6 +947,13 @@ class Othello:
         if not placable:
             return
 
+        # 思考中表示
+        self.show_thinking()
+        # canvasを更新してからminimax実行(ブロッキング回避)
+        self.master.after(10, lambda: self._com_compute(placable))
+
+    def _com_compute(self, placable):
+        """minimax探索を別スレッドで実行し、結果をメインスレッドに返す"""
         # 難易度に応じた探索深さと重みを選択
         depth = self.get_com_depth()
         weights = self.get_com_weights()
@@ -882,20 +964,50 @@ class Othello:
         # 盤面の色情報を取得
         board_colors = get_board_colors(self.board)
 
-        # Minimaxで最善手を探索
-        _, best_move = minimax(board_colors, depth, float('-inf'), float('inf'),
-                               True, com_color, you_color, weights)
+        def compute():
+            # バックグラウンドスレッドでminimax探索を実行
+            _, best_move = minimax(board_colors, depth, float('-inf'), float('inf'),
+                                   True, com_color, you_color, weights)
 
-        if best_move is None:
-            # フォールバック: ランダム選択
-            best_move = random.choice(placable)
+            if best_move is None:
+                best_move_final = random.choice(placable)
+            else:
+                best_move_final = best_move
+
+            # メインスレッドに結果を返す
+            self.master.after(0, lambda: self._com_apply_move(best_move_final))
+
+        thread = threading.Thread(target=compute, daemon=True)
+        thread.start()
+
+    def _com_apply_move(self, best_move):
+        """メインスレッドでCOMの手を盤面に反映する"""
+        # 思考中表示を消す
+        self.hide_thinking()
 
         x, y = best_move
         self.place(x, y)
         self.highlight_flash()
 
+    def show_thinking(self):
+        """COMの思考中テキストをcanvasに表示"""
+        self.canvas.delete("thinking")
+        font_size = max(12, min(24, self.board_size // 16))
+        self.canvas.create_text(
+            self.x_offset + self.board_size // 2,
+            INFO_HEIGHT + self.board_size // 2,
+            text="\u8003\u3048\u4e2d...",
+            fill="#333333", font=("Arial", font_size, "bold"),
+            tags="thinking")
+
+    def hide_thinking(self):
+        """COMの思考中テキストを削除"""
+        self.canvas.delete("thinking")
+
     def get_com_depth(self):
-        """現在の難易度に応じた探索深さを返す"""
+        """ゲーム開始時にスナップショットした探索深さを返す"""
+        if hasattr(self, 'game_depth') and self.game_depth is not None:
+            return self.game_depth
         global difficulty_var
         if difficulty_var is None:
             return DIFFICULTY_BEGINNER
@@ -903,11 +1015,8 @@ class Othello:
         return level
 
     def get_com_weights(self):
-        """現在の難易度に応じた重みテーブルを返す"""
-        global difficulty_var
-        if difficulty_var is None:
-            return DEFAULT_EVAL_WEIGHTS
-        level = difficulty_var.get()
+        """ゲーム開始時の難易度に応じた重みテーブルを返す"""
+        level = self.get_com_depth()
         if level == DIFFICULTY_ADVANCED:
             learned = load_learned_weights()
             if learned is not None:
@@ -928,66 +1037,171 @@ class Othello:
 
 # メイン
 window.title("Othello")
+
+# グローバル変数
+stone_count_label = None
+
+# === トップバー ===
 top_frame = tk.Frame(window)
 top_frame.pack(fill="x")
+
+# 歯車(設定)ボタン - 左側
+settings_btn = tk.Button(top_frame, text="\u2699", font=("Arial", 16),
+                         relief="flat", cursor="hand2")
+settings_btn.pack(side="left", padx=10, pady=5)
+
+# STARTボタン - 中央に配置するためのフレーム
+center_frame = tk.Frame(top_frame)
+center_frame.pack(side="left", expand=True)
+
+start_button = tk.Button(center_frame, text="START", font=("Arial", 14, "bold"),
+                         command=open_janken, bg="#4CAF50", fg="white",
+                         activebackground="#45a049", padx=20, pady=2)
+start_button.pack()
+
+# ヘルプボタン - 右側
+help_btn = tk.Button(top_frame, text="\u2753", font=("Arial", 14),
+                     relief="flat", cursor="hand2")
+help_btn.pack(side="right", padx=10, pady=5)
+
+# === 設定パネル（折りたたみ式） ===
+settings_frame = tk.Frame(window, bg="#f0f0f0", relief="groove", bd=1)
+settings_visible = tk.BooleanVar(value=False)
 
 # 難易度選択
 difficulty_var = tk.IntVar(value=DIFFICULTY_BEGINNER)
 
-difficulty_frame = tk.Frame(top_frame)
-difficulty_frame.pack(side="left", padx=10, pady=5)
+# アニメーション速度
+animation_speed_var = tk.IntVar(value=ANIM_SPEED_NORMAL)
 
-tk.Label(difficulty_frame, text="難易度:", font=("Arial", 10)).pack(side="left")
-tk.Radiobutton(difficulty_frame, text="初級", variable=difficulty_var,
-               value=DIFFICULTY_BEGINNER, font=("Arial", 10)).pack(side="left")
-tk.Radiobutton(difficulty_frame, text="中級", variable=difficulty_var,
-               value=DIFFICULTY_MEDIUM, font=("Arial", 10)).pack(side="left")
-tk.Radiobutton(difficulty_frame, text="上級", variable=difficulty_var,
-               value=DIFFICULTY_ADVANCED, font=("Arial", 10)).pack(side="left")
+# サウンドON/OFF
+sound_enabled_var = tk.BooleanVar(value=True)
 
-start_button = tk.Button(top_frame, text="START", font=("Arial", 14, "bold"), command=open_janken)
-start_button.pack(side="left", padx=10, pady=5)
+def toggle_settings():
+    if settings_visible.get():
+        settings_frame.pack_forget()
+        settings_btn.config(text="\u2699")
+        settings_visible.set(False)
+    else:
+        # 相互排他: ヘルプが開いていたら閉じる
+        if help_visible.get():
+            help_frame.pack_forget()
+            help_btn.config(text="\u2753")
+            help_visible.set(False)
+        settings_frame.pack(fill="x", after=top_frame)
+        settings_btn.config(text="\u2699 \u25bc")
+        settings_visible.set(True)
 
+settings_btn.config(command=toggle_settings)
 
+# 設定パネル内容
+settings_inner = tk.Frame(settings_frame, bg="#f0f0f0")
+settings_inner.pack(fill="x", padx=10, pady=8)
 
-game_frame = tk.Frame(window)
-game_frame.pack(fill="both", expand=True)
+# 難易度設定
+diff_frame = tk.Frame(settings_inner, bg="#f0f0f0")
+diff_frame.pack(fill="x", pady=2)
+tk.Label(diff_frame, text="COM\u30ec\u30d9\u30eb:", font=("Arial", 10), bg="#f0f0f0").pack(side="left")
+diff_rb_beginner = tk.Radiobutton(diff_frame, text="\u521d\u7d1a", variable=difficulty_var,
+               value=DIFFICULTY_BEGINNER, font=("Arial", 10), bg="#f0f0f0")
+diff_rb_beginner.pack(side="left", padx=5)
+diff_rb_medium = tk.Radiobutton(diff_frame, text="\u4e2d\u7d1a", variable=difficulty_var,
+               value=DIFFICULTY_MEDIUM, font=("Arial", 10), bg="#f0f0f0")
+diff_rb_medium.pack(side="left", padx=5)
+diff_rb_advanced = tk.Radiobutton(diff_frame, text="\u4e0a\u7d1a", variable=difficulty_var,
+               value=DIFFICULTY_ADVANCED, font=("Arial", 10), bg="#f0f0f0")
+diff_rb_advanced.pack(side="left", padx=5)
 
-# ヘルプパネル（折りたたみ式）
+difficulty_radio_buttons = [diff_rb_beginner, diff_rb_medium, diff_rb_advanced]
+
+def set_difficulty_controls_state(state):
+    """難易度ラジオボタンの有効/無効を切り替える"""
+    for rb in difficulty_radio_buttons:
+        rb.config(state=state)
+
+# アニメーション速度設定
+anim_frame = tk.Frame(settings_inner, bg="#f0f0f0")
+anim_frame.pack(fill="x", pady=2)
+tk.Label(anim_frame, text="\u30a2\u30cb\u30e1\u901f\u5ea6:", font=("Arial", 10), bg="#f0f0f0").pack(side="left")
+tk.Radiobutton(anim_frame, text="\u901f\u3044", variable=animation_speed_var,
+               value=ANIM_SPEED_FAST, font=("Arial", 10), bg="#f0f0f0").pack(side="left", padx=5)
+tk.Radiobutton(anim_frame, text="\u666e\u901a", variable=animation_speed_var,
+               value=ANIM_SPEED_NORMAL, font=("Arial", 10), bg="#f0f0f0").pack(side="left", padx=5)
+tk.Radiobutton(anim_frame, text="\u9045\u3044", variable=animation_speed_var,
+               value=ANIM_SPEED_SLOW, font=("Arial", 10), bg="#f0f0f0").pack(side="left", padx=5)
+
+# サウンドON/OFF設定
+sound_frame = tk.Frame(settings_inner, bg="#f0f0f0")
+sound_frame.pack(fill="x", pady=2)
+
+sound_label_var = tk.StringVar(value="\ud83d\udd0a \u30b5\u30a6\u30f3\u30c9 ON")
+
+def on_sound_toggle():
+    """サウンドトグル時にラベル更新とBGM制御"""
+    if sound_enabled_var.get():
+        sound_label_var.set("\ud83d\udd0a \u30b5\u30a6\u30f3\u30c9 ON")
+    else:
+        sound_label_var.set("\ud83d\udd07 \u30b5\u30a6\u30f3\u30c9 OFF")
+    toggle_bgm()
+
+tk.Checkbutton(sound_frame, textvariable=sound_label_var,
+               variable=sound_enabled_var, font=("Arial", 10), bg="#f0f0f0",
+               command=on_sound_toggle).pack(side="left")
+
+# === ヘルプパネル（折りたたみ式） ===
 help_frame = tk.Frame(window)
-help_frame.pack(fill="x", before=game_frame)
-
 help_visible = tk.BooleanVar(value=False)
 
-def toggle_help():
-    if help_visible.get():
-        help_content.pack_forget()
-        help_toggle_btn.config(text="ヘルプ \u25b6")
-        help_visible.set(False)
-    else:
-        help_content.pack(fill="x", padx=10, pady=(0, 5))
-        help_toggle_btn.config(text="ヘルプ \u25bc")
-        help_visible.set(True)
-
-help_toggle_btn = tk.Button(help_frame, text="ヘルプ \u25b6", font=("Arial", 10),
-                            command=toggle_help, relief="flat", cursor="hand2")
-help_toggle_btn.pack(anchor="w", padx=10, pady=2)
-
 help_text = (
-    "【遊び方】\n"
-    "1. STARTボタンを押してジャンケンで先攻/後攻を決定\n"
-    "2. 黄色い丸(ガイド)が置ける場所です\n"
-    "3. 相手の石を挟める場所にクリックして石を置きます\n"
-    "4. 置ける場所がない場合は自動でパスになります\n"
-    "5. 全マス埋まるか両者置けなくなったら終了\n"
-    "6. 石が多い方の勝ちです"
+    "\u3010\u904a\u3073\u65b9\u3011\n"
+    "1. START\u30dc\u30bf\u30f3\u3092\u62bc\u3057\u3066\u30b8\u30e3\u30f3\u30b1\u30f3\u3067\u5148\u653b/\u5f8c\u653b\u3092\u6c7a\u5b9a\n"
+    "2. \u9ec4\u8272\u3044\u4e38(\u30ac\u30a4\u30c9)\u304c\u7f6e\u3051\u308b\u5834\u6240\u3067\u3059\n"
+    "3. \u76f8\u624b\u306e\u77f3\u3092\u631f\u3081\u308b\u5834\u6240\u306b\u30af\u30ea\u30c3\u30af\u3057\u3066\u77f3\u3092\u7f6e\u304d\u307e\u3059\n"
+    "4. \u7f6e\u3051\u308b\u5834\u6240\u304c\u306a\u3044\u5834\u5408\u306f\u81ea\u52d5\u3067\u30d1\u30b9\u306b\u306a\u308a\u307e\u3059\n"
+    "5. \u5168\u30de\u30b9\u57cb\u307e\u308b\u304b\u4e21\u8005\u7f6e\u3051\u306a\u304f\u306a\u3063\u305f\u3089\u7d42\u4e86\n"
+    "6. \u77f3\u304c\u591a\u3044\u65b9\u306e\u52dd\u3061\u3067\u3059"
 )
+
 help_content = tk.Label(help_frame, text=help_text, font=("Arial", 9),
                         justify="left", anchor="w", bg="#fffde6",
                         relief="groove", padx=8, pady=5)
 
+def toggle_help():
+    if help_visible.get():
+        help_frame.pack_forget()
+        help_btn.config(text="\u2753")
+        help_visible.set(False)
+    else:
+        # 相互排他: 設定パネルが開いていたら閉じる
+        if settings_visible.get():
+            settings_frame.pack_forget()
+            settings_btn.config(text="\u2699")
+            settings_visible.set(False)
+        help_frame.pack(fill="x", after=top_frame)
+        help_content.pack(fill="x", padx=10, pady=5)
+        help_btn.config(text="\u2753 \u25bc")
+        help_visible.set(True)
+
+help_btn.config(command=toggle_help)
+
+# === ゲームフレーム ===
+game_frame = tk.Frame(window)
+game_frame.pack(fill="both", expand=True)
+
+# === 石数表示(盤面下部) ===
+bottom_frame = tk.Frame(window)
+bottom_frame.pack(fill="x")
+
+stone_count_label = tk.Label(bottom_frame, text="\u25cf 2    \u25cb 2",
+                             font=("Arial", 14, "bold"), pady=5)
+stone_count_label.pack()
 
 othello = Othello(game_frame)
 othello.reset_game(YOU)
+
+# BGM再生開始(tkinter変数初期化後に開始し、ミュート状態を尊重)
+if bgm_loaded and sound_enabled_var.get():
+    pygame.mixer.music.play(-1)
+
 window.mainloop()
 pygame.mixer.quit()
