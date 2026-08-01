@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "feat",
   "description": "Implement minimax with alpha-beta pruning, self-learning weights via self-play, difficulty levels (初級/中級/上級), weight persistence to JSON, and fix the guide display bug",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "1. Fix the guide display bug: In reversi.py, change SHOW_GUIDE = False to SHOW_GUIDE = True. The draw_placable() method currently uses self.get_placable_list(YOU) which correctly returns only valid positions - verify this logic is correct. The bug may be that draw_placable() is called when self.player != YOU or during animations. The method already has guards for self.animating and self.player != YOU, so check if those guards are working correctly. Also check if draw_placable is called at wrong times (e.g., after change_turn when player is COM).",
     "2. Implement minimax with alpha-beta pruning: Add a minimax method to the Othello class (or a separate AI module). The algorithm should: (a) evaluate board positions using a weights table, (b) search to a configurable depth, (c) use alpha-beta pruning for efficiency. The evaluation function should consider: positional weights from the table, mobility (number of moves available), and stone count in endgame. Need a method to simulate placing a stone and get resulting board state without GUI updates.",
@@ -31,5 +31,5 @@
     "Verify difficulty level UI elements exist (初級, 中級, 上級)"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Guide bug was caused by after_animation() calling draw_placable() redundantly after change_turn() which already triggers start_turn() with proper draw_placable() gating. Fix: removed the extra draw_placable() call from after_animation(). Self-play learning uses depth=2 for speed. pyenv requires python3 command (not python) in this environment."
 }
