@@ -1,0 +1,7 @@
+{
+  "task_id": "task-minimax-selflearn",
+  "task_description": "Add minimax with alpha-beta pruning for COM AI, implement self-learning of evaluation weights via self-play, add difficulty levels (初級/中級/上級), persist learned weights to JSON, and fix the guide display bug showing indicators on non-placable squares",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}
