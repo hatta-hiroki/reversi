@@ -470,6 +470,7 @@ class Othello:
         self.master = master
         self.board_size = CANVAS_SIZE
         self.square = self.board_size // NUM_SQUARE
+        self.x_offset = 0
         self.canvas = tk.Canvas(master, width=CANVAS_SIZE, height=CANVAS_SIZE + INFO_HEIGHT,
                                 bg="#d9d9d9", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -478,6 +479,7 @@ class Othello:
         self.animating = False
         self.color = {YOU: YOUR_COLOR, COM: COM_COLOR}
         self._resize_after_id = None
+        self._canvas_width = CANVAS_SIZE
         self.canvas.bind("<Configure>", self._on_configure)
 
     # リサイズイベントハンドラ（デバウンス付き）
@@ -490,21 +492,23 @@ class Othello:
         new_board_size = min(new_w, new_h)
         if new_board_size < 80:
             return
-        if abs(new_board_size - self.board_size) < 4:
+        if abs(new_board_size - self.board_size) < 4 and abs(new_w - self._canvas_width) < 4:
             return
+        self._canvas_width = new_w
         # デバウンス: 短時間に複数回呼ばれるのを防ぐ
         if self._resize_after_id is not None:
             self.master.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.master.after(100, lambda: self._do_resize(new_board_size))
+        self._resize_after_id = self.master.after(100, lambda: self._do_resize(new_board_size, new_w))
 
-    def _do_resize(self, new_board_size):
+    def _do_resize(self, new_board_size, canvas_width):
         self._resize_after_id = None
         if self.animating:
             # アニメーション中はリサイズを遅延
-            self._resize_after_id = self.master.after(200, lambda: self._do_resize(new_board_size))
+            self._resize_after_id = self.master.after(200, lambda: self._do_resize(new_board_size, canvas_width))
             return
         self.board_size = new_board_size
         self.square = self.board_size // NUM_SQUARE
+        self.x_offset = (canvas_width - self.board_size) // 2
         self.redraw_all()
 
     def redraw_all(self):
@@ -519,7 +523,7 @@ class Othello:
             for x in range(NUM_SQUARE):
                 cell = self.board[y][x]
                 if cell is not None:
-                    cx = (x + 0.5) * self.square
+                    cx = self.x_offset + (x + 0.5) * self.square
                     cy = INFO_HEIGHT + (y + 0.5) * self.square
                     r = self.square * 0.4
                     disk_id = self.canvas.create_oval(
@@ -532,9 +536,11 @@ class Othello:
 
     # 上部UI表示
     def draw_info_background(self):
-        self.canvas.create_rectangle(0, 0, self.board_size, INFO_HEIGHT,
+        self.canvas.create_rectangle(self.x_offset, 0,
+                                     self.x_offset + self.board_size, INFO_HEIGHT,
                                      fill=INFO_BG_COLOR, outline="", tags="info_bg")
-        self.canvas.create_line(0, INFO_HEIGHT, self.board_size, INFO_HEIGHT, fill="gray")
+        self.canvas.create_line(self.x_offset, INFO_HEIGHT,
+                                self.x_offset + self.board_size, INFO_HEIGHT, fill="gray")
         self.canvas.tag_lower("info_bg")
 
     # プレイヤーとCOMの石の色を表示
@@ -547,12 +553,17 @@ class Othello:
         you_mark = "\u25cf" if you_color == "black" else "\u25cb"
         com_mark = "\u25cf" if com_color == "black" else "\u25cb"
 
-        self.canvas.create_text(self.board_size // 4, 18,
+        # フォントサイズを盤面サイズに応じて調整（はみ出し防止）
+        font_size = max(8, min(14, self.board_size // 30))
+
+        self.canvas.create_text(self.x_offset + self.board_size // 4, 18,
                                 text=f"YOU : {you_mark} {you_color.upper()}",
-                                fill=INFO_TEXT_COLOR, font=("Arial", 14, "bold"), tags="color_info")
-        self.canvas.create_text(self.board_size * 3 // 4, 18,
+                                fill=INFO_TEXT_COLOR, font=("Arial", font_size, "bold"),
+                                tags="color_info")
+        self.canvas.create_text(self.x_offset + self.board_size * 3 // 4, 18,
                                 text=f"COM : {com_mark} {com_color.upper()}",
-                                fill=INFO_TEXT_COLOR, font=("Arial", 14, "bold"), tags="color_info")
+                                fill=INFO_TEXT_COLOR, font=("Arial", font_size, "bold"),
+                                tags="color_info")
     
     # 石が置ける場所の表示
     def draw_placable(self):
@@ -570,7 +581,7 @@ class Othello:
         placable_list = self.get_placable_list(YOU)
         guide_r = max(3, self.square * 0.1)
         for x, y in placable_list:
-            cx = (x + 0.5) * self.square
+            cx = self.x_offset + (x + 0.5) * self.square
             cy = INFO_HEIGHT + (y + 0.5) * self.square
             self.canvas.create_oval(cx - guide_r, cy - guide_r,
                                     cx + guide_r, cy + guide_r,
@@ -599,7 +610,7 @@ class Othello:
         self.canvas.delete("grid")
         for y in range(NUM_SQUARE):
             for x in range(NUM_SQUARE):
-                xs = x * self.square
+                xs = self.x_offset + x * self.square
                 ys = INFO_HEIGHT + y * self.square
                 xe = xs + self.square
                 ye = ys + self.square
@@ -618,7 +629,7 @@ class Othello:
 
     # 指定された場所に石を配置し、内部データ(self.board)を更新
     def drawDisk(self, x, y, player):
-        cx = (x + 0.5) * self.square
+        cx = self.x_offset + (x + 0.5) * self.square
         cy = INFO_HEIGHT + (y + 0.5) * self.square
         r = self.square * 0.4
         disk_id = self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,fill=self.color[player])
@@ -637,7 +648,7 @@ class Othello:
             return
 
         x, y = self.last_move
-        cx = (x + 0.5) * self.square
+        cx = self.x_offset + (x + 0.5) * self.square
         cy = INFO_HEIGHT + (y + 0.5) * self.square
         highlight_r = self.square * 0.36
         self.canvas.create_oval(cx - highlight_r, cy - highlight_r,
@@ -649,7 +660,7 @@ class Othello:
         disk = self.board[y][x]
         disk_id = disk["id"]
 
-        cx = (x + 0.5) * self.square
+        cx = self.x_offset + (x + 0.5) * self.square
         cy = INFO_HEIGHT + (y + 0.5) * self.square
         r = self.square * 0.4
 
@@ -754,7 +765,7 @@ class Othello:
         if event.y < INFO_HEIGHT:
             return
 
-        x, y = event.x // self.square,  (event.y - INFO_HEIGHT) // self.square
+        x, y = (event.x - self.x_offset) // self.square, (event.y - INFO_HEIGHT) // self.square
 
         if 0 <= x < NUM_SQUARE and 0 <= y < NUM_SQUARE:
             if self.checkPlacable(x, y):
@@ -812,9 +823,14 @@ class Othello:
         self.canvas.delete("pass")
         self.animating = True
 
+        # フォントサイズを盤面サイズに応じて調整（はみ出し防止）
+        pass_font_size = max(16, min(36, self.board_size // 10))
+
         text = f"{name} PASS"
-        self.canvas.create_text(self.board_size // 2, INFO_HEIGHT + self.board_size // 2,
-                                text=text, fill="red", font=("Arial", 36, "bold"), tags="pass")
+        self.canvas.create_text(self.x_offset + self.board_size // 2,
+                                INFO_HEIGHT + self.board_size // 2,
+                                text=text, fill="red",
+                                font=("Arial", pass_font_size, "bold"), tags="pass")
 
         def clear_pass():
             self.canvas.delete("pass")
