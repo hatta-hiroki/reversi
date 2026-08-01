@@ -1184,13 +1184,14 @@ def toggle_help():
 
 help_btn.config(command=toggle_help)
 
+# === 石数表示(盤面下部) ===
+# bottom_frameを先にpackすることで、ウィンドウ縮小時も常に表示される
+bottom_frame = tk.Frame(window)
+bottom_frame.pack(fill="x", side="bottom")
+
 # === ゲームフレーム ===
 game_frame = tk.Frame(window)
-game_frame.pack(fill="both", expand=True)
-
-# === 石数表示(盤面下部) ===
-bottom_frame = tk.Frame(window)
-bottom_frame.pack(fill="x")
+game_frame.pack(fill="both", expand=True, side="top")
 
 stone_count_label = tk.Label(bottom_frame, text="\u25cf 2    \u25cb 2",
                              font=("Arial", 14, "bold"), pady=5)
