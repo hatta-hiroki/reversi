@@ -399,6 +399,7 @@ def run_self_learning(num_games=100, progress_callback=None):
 window = tk.Tk()
 window.title("reversi")
 window.geometry("700x500")
+window.minsize(500, 550)  # 盤面が完全に表示される最小サイズ
 
 # 難易度の状態変数(tkinter IntVar は後で初期化)
 difficulty_var = None
@@ -596,16 +597,25 @@ class Othello:
         com_mark = "\u25cf" if com_color == "black" else "\u25cb"
 
         # フォントサイズを盤面サイズに応じて調整（はみ出し防止）
-        font_size = max(8, min(14, self.board_size // 30))
+        font_size = max(7, min(12, self.board_size // 35))
 
-        self.canvas.create_text(self.x_offset + self.board_size // 4, 18,
-                                text=f"YOU : {you_mark} {you_color.upper()}",
+        # 盤面が小さい場合は短縮表示で文字の重なりを防止
+        if self.board_size < 300:
+            you_text = f"YOU:{you_mark}"
+            com_text = f"COM:{com_mark}"
+        else:
+            you_text = f"YOU : {you_mark} {you_color.upper()}"
+            com_text = f"COM : {com_mark} {com_color.upper()}"
+
+        # 左寄せ(anchor=w)と右寄せ(anchor=e)で重ならないように配置
+        self.canvas.create_text(self.x_offset + 10, 18,
+                                text=you_text,
                                 fill=INFO_TEXT_COLOR, font=("Arial", font_size, "bold"),
-                                tags="color_info")
-        self.canvas.create_text(self.x_offset + self.board_size * 3 // 4, 18,
-                                text=f"COM : {com_mark} {com_color.upper()}",
+                                anchor="w", tags="color_info")
+        self.canvas.create_text(self.x_offset + self.board_size - 10, 18,
+                                text=com_text,
                                 fill=INFO_TEXT_COLOR, font=("Arial", font_size, "bold"),
-                                tags="color_info")
+                                anchor="e", tags="color_info")
     
     # 石が置ける場所の表示
     def draw_placable(self):
