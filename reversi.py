@@ -1,8 +1,8 @@
 import os
 import sys
 import random
-import copy
 import json
+import threading
 import pygame
 import tkinter as tk
 from PIL import ImageTk, Image
@@ -40,8 +40,6 @@ DEFAULT_EVAL_WEIGHTS = [
     [ 30, -12,  0, -1, -1,  0, -12,  30],
 ]
 
-EVAL_WEIGHTS = [row[:] for row in DEFAULT_EVAL_WEIGHTS]
-
 # 学習済み重みファイルパス
 LEARNED_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "learned_weights.json")
 
@@ -57,8 +55,11 @@ def load_learned_weights():
 
 # 学習済み重みの保存
 def save_learned_weights(weights):
-    with open(LEARNED_WEIGHTS_PATH, "w") as f:
-        json.dump(weights, f, indent=2)
+    try:
+        with open(LEARNED_WEIGHTS_PATH, "w") as f:
+            json.dump(weights, f, indent=2)
+    except (IOError, OSError) as e:
+        print(f"Warning: Could not save learned weights: {e}")
 
 # 難易度設定
 DIFFICULTY_BEGINNER = 1   # 初級: depth=1
@@ -260,7 +261,7 @@ def minimax(board_colors, depth, alpha, beta, maximizing, com_color, you_color, 
 
 # ===== 自己学習エンジン =====
 
-def self_play_game(weights):
+def self_play_game(weights, epsilon=0.1):
     """GUIなしでCOM vs COMの1ゲームを実行し、各プレイヤーが置いた場所を記録"""
     board = [[None] * NUM_SQUARE for _ in range(NUM_SQUARE)]
     mid = NUM_SQUARE // 2
@@ -290,13 +291,16 @@ def self_play_game(weights):
 
         pass_count = 0
 
-        # depth=2 で探索 (学習速度と品質のバランス)
-        _, best_move = minimax(board, 2, float('-inf'), float('inf'),
-                               True, current_color, opponent_color, weights)
-
-        if best_move is None:
-            # フォールバック: ランダム選択
+        # epsilon-greedy: 探索多様性のためにランダムな手を選ぶことがある
+        if random.random() < epsilon:
             best_move = random.choice(placable)
+        else:
+            # depth=2 で探索 (学習速度と品質のバランス)
+            _, best_move = minimax(board, 2, float('-inf'), float('inf'),
+                                   True, current_color, opponent_color, weights)
+
+            if best_move is None:
+                best_move = random.choice(placable)
 
         x, y = best_move
         board = sim_place(board, x, y, current_color, opponent_color)
@@ -324,9 +328,11 @@ def run_self_learning(num_games=100, progress_callback=None):
         weights = [row[:] for row in learned]
 
     learning_rate = 0.5
+    weight_min = -50.0
+    weight_max = 50.0
 
     for game_idx in range(num_games):
-        black_count, white_count, black_moves, white_moves = self_play_game(weights)
+        black_count, white_count, black_moves, white_moves = self_play_game(weights, epsilon=0.1)
 
         # 勝者の手の位置の重みを増加、敗者の手の位置の重みを減少
         if black_count > white_count:
@@ -342,9 +348,9 @@ def run_self_learning(num_games=100, progress_callback=None):
             continue
 
         for x, y in winner_moves:
-            weights[y][x] += learning_rate
+            weights[y][x] = min(weight_max, weights[y][x] + learning_rate)
         for x, y in loser_moves:
-            weights[y][x] -= learning_rate
+            weights[y][x] = max(weight_min, weights[y][x] - learning_rate)
 
         if progress_callback:
             progress_callback(game_idx + 1, num_games)
@@ -819,6 +825,18 @@ class Othello:
             learned = load_learned_weights()
             if learned is not None:
                 return learned
+        elif level == DIFFICULTY_MEDIUM:
+            # 中級: 学習済み重みを50%ブレンド(デフォルトと学習済みの中間)
+            learned = load_learned_weights()
+            if learned is not None:
+                blended = []
+                for y in range(NUM_SQUARE):
+                    row = []
+                    for x in range(NUM_SQUARE):
+                        val = (DEFAULT_EVAL_WEIGHTS[y][x] + learned[y][x]) / 2.0
+                        row.append(val)
+                    blended.append(row)
+                return blended
         return DEFAULT_EVAL_WEIGHTS
 
 # メイン
@@ -845,23 +863,29 @@ start_button.pack(side="left", padx=10, pady=5)
 
 # 学習モードボタンと処理
 def start_learning_mode():
-    """学習モードを開始する"""
+    """学習モードを開始する(バックグラウンドスレッドで実行)"""
     num_games = 100
     learn_btn.config(state="disabled")
     progress_label.config(text="学習中: 0/" + str(num_games))
-    window.update()
+
+    def learning_thread():
+        """バックグラウンドで学習を実行するスレッド"""
+        run_self_learning(num_games=num_games, progress_callback=progress_callback)
+        # 完了後UIスレッドで後処理
+        window.after(0, learning_complete)
 
     def progress_callback(current, total):
-        progress_label.config(text=f"学習中: {current}/{total}")
-        if current % 10 == 0:
-            window.update()
+        # UIの更新はメインスレッドで行う
+        window.after(0, lambda c=current, t=total: progress_label.config(text=f"学習中: {c}/{t}"))
 
-    run_self_learning(num_games=num_games, progress_callback=progress_callback)
+    def learning_complete():
+        progress_label.config(text="学習完了!")
+        learn_btn.config(state="normal")
+        messagebox.showinfo("学習モード", f"{num_games}ゲームの自己学習が完了しました。\n重みデータを保存しました。")
+        progress_label.config(text="")
 
-    progress_label.config(text="学習完了!")
-    learn_btn.config(state="normal")
-    messagebox.showinfo("学習モード", f"{num_games}ゲームの自己学習が完了しました。\n重みデータを保存しました。")
-    progress_label.config(text="")
+    thread = threading.Thread(target=learning_thread, daemon=True)
+    thread.start()
 
 learn_btn = tk.Button(top_frame, text="学習モード", font=("Arial", 10), command=start_learning_mode)
 learn_btn.pack(side="left", padx=10, pady=5)

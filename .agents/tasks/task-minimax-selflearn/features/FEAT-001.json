@@ -31,5 +31,5 @@
     "Verify difficulty level UI elements exist (初級, 中級, 上級)"
   ],
   "blocked_reason": null,
-  "findings": "Guide bug was caused by after_animation() calling draw_placable() redundantly after change_turn() which already triggers start_turn() with proper draw_placable() gating. Fix: removed the extra draw_placable() call from after_animation(). Self-play learning uses depth=2 for speed. pyenv requires python3 command (not python) in this environment."
+  "findings": "Guide bug was caused by after_animation() calling draw_placable() redundantly after change_turn() which already triggers start_turn() with proper draw_placable() gating. Fix: removed the extra draw_placable() call from after_animation(). Self-play learning uses depth=2 for speed. pyenv requires python3 command (not python) in this environment. Review fixes applied: (1) moved learning to background thread with after-based UI updates, (2) added epsilon-greedy exploration to self-play, (3) medium difficulty now uses 50% blended learned weights, (4) weight clamping to [-50, 50], (5) removed unused import copy and dead EVAL_WEIGHTS global, (6) added try/except to save_learned_weights."
 }
