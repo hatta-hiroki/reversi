@@ -2,7 +2,6 @@ import os
 import sys
 import random
 import json
-import threading
 import pygame
 import tkinter as tk
 from PIL import ImageTk, Image
@@ -469,18 +468,73 @@ def start_othello_game(first_player):
 class Othello:
     def __init__(self, master):
         self.master = master
-        self.square = CANVAS_SIZE // NUM_SQUARE
-        self.canvas = tk.Canvas(master,width=CANVAS_SIZE,height=CANVAS_SIZE + INFO_HEIGHT,bg=BOARD_COLOR,highlightthickness=0)
-        self.canvas.pack()
+        self.board_size = CANVAS_SIZE
+        self.square = self.board_size // NUM_SQUARE
+        self.canvas = tk.Canvas(master, width=CANVAS_SIZE, height=CANVAS_SIZE + INFO_HEIGHT,
+                                bg=BOARD_COLOR, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
         self.last_move = None
         self.player = YOU
         self.animating = False
         self.color = {YOU: YOUR_COLOR, COM: COM_COLOR}
+        self._resize_after_id = None
+        self.canvas.bind("<Configure>", self._on_configure)
+
+    # リサイズイベントハンドラ（デバウンス付き）
+    def _on_configure(self, event):
+        # キャンバスのサイズ変更時のみ処理
+        if event.widget != self.canvas:
+            return
+        new_w = event.width
+        new_h = event.height - INFO_HEIGHT
+        new_board_size = min(new_w, new_h)
+        if new_board_size < 80:
+            return
+        if abs(new_board_size - self.board_size) < 4:
+            return
+        # デバウンス: 短時間に複数回呼ばれるのを防ぐ
+        if self._resize_after_id is not None:
+            self.master.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.master.after(100, lambda: self._do_resize(new_board_size))
+
+    def _do_resize(self, new_board_size):
+        self._resize_after_id = None
+        if self.animating:
+            # アニメーション中はリサイズを遅延
+            self._resize_after_id = self.master.after(200, lambda: self._do_resize(new_board_size))
+            return
+        self.board_size = new_board_size
+        self.square = self.board_size // NUM_SQUARE
+        self.redraw_all()
+
+    def redraw_all(self):
+        """現在の盤面状態を新しいサイズで再描画"""
+        if not hasattr(self, 'board'):
+            return
+        self.canvas.delete("all")
+        self.draw_info_background()
+        self.draw_board()
+        # 既存の石を再描画
+        for y in range(NUM_SQUARE):
+            for x in range(NUM_SQUARE):
+                cell = self.board[y][x]
+                if cell is not None:
+                    cx = (x + 0.5) * self.square
+                    cy = INFO_HEIGHT + (y + 0.5) * self.square
+                    r = self.square * 0.4
+                    disk_id = self.canvas.create_oval(
+                        cx - r, cy - r, cx + r, cy + r,
+                        fill=cell["color"])
+                    cell["id"] = disk_id
+        self.show_color_info()
+        self.draw_placable()
+        self.draw_last_move()
 
     # 上部UI表示
     def draw_info_background(self):
-        self.canvas.create_rectangle(0, 0,CANVAS_SIZE, INFO_HEIGHT,fill=INFO_BG_COLOR,outline="",tags="info_bg")
-        self.canvas.create_line(0, INFO_HEIGHT,CANVAS_SIZE, INFO_HEIGHT,fill="gray")
+        self.canvas.create_rectangle(0, 0, self.board_size, INFO_HEIGHT,
+                                     fill=INFO_BG_COLOR, outline="", tags="info_bg")
+        self.canvas.create_line(0, INFO_HEIGHT, self.board_size, INFO_HEIGHT, fill="gray")
         self.canvas.tag_lower("info_bg")
 
     # プレイヤーとCOMの石の色を表示
@@ -490,11 +544,15 @@ class Othello:
         you_color = self.color[YOU]
         com_color = self.color[COM]
 
-        you_mark = "●" if you_color == "black" else "○"
-        com_mark = "●" if com_color == "black" else "○"
+        you_mark = "\u25cf" if you_color == "black" else "\u25cb"
+        com_mark = "\u25cf" if com_color == "black" else "\u25cb"
 
-        self.canvas.create_text(CANVAS_SIZE // 4, 18,text=f"YOU : {you_mark} {you_color.upper()}",fill=INFO_TEXT_COLOR,font=("Arial", 14, "bold"),tags="color_info")
-        self.canvas.create_text(CANVAS_SIZE * 3 // 4, 18,text=f"COM : {com_mark} {com_color.upper()}",fill=INFO_TEXT_COLOR,font=("Arial", 14, "bold"),tags="color_info")
+        self.canvas.create_text(self.board_size // 4, 18,
+                                text=f"YOU : {you_mark} {you_color.upper()}",
+                                fill=INFO_TEXT_COLOR, font=("Arial", 14, "bold"), tags="color_info")
+        self.canvas.create_text(self.board_size * 3 // 4, 18,
+                                text=f"COM : {com_mark} {com_color.upper()}",
+                                fill=INFO_TEXT_COLOR, font=("Arial", 14, "bold"), tags="color_info")
     
     # 石が置ける場所の表示
     def draw_placable(self):
@@ -510,10 +568,13 @@ class Othello:
             return
 
         placable_list = self.get_placable_list(YOU)
+        guide_r = max(3, self.square * 0.1)
         for x, y in placable_list:
             cx = (x + 0.5) * self.square
             cy = INFO_HEIGHT + (y + 0.5) * self.square
-            self.canvas.create_oval(cx - 5, cy - 5,cx + 5, cy + 5,fill="yellow",outline="orange",tags="guide")
+            self.canvas.create_oval(cx - guide_r, cy - guide_r,
+                                    cx + guide_r, cy + guide_r,
+                                    fill="yellow", outline="orange", tags="guide")
 
     # 初期化
     def reset_game(self, first_player):
@@ -544,13 +605,16 @@ class Othello:
                 ye = ys + self.square
                 self.canvas.create_rectangle(xs, ys, xe, ye, tags="grid")
 
-    # 中央の初期石を設置
+    # 中央の初期石を設置 (標準リバーシ配置: 色で固定)
     def init_stones(self):
         mid = NUM_SQUARE // 2
-        self.drawDisk(mid - 1, mid - 1, COM)
-        self.drawDisk(mid, mid, COM)
-        self.drawDisk(mid - 1, mid, YOU)
-        self.drawDisk(mid, mid - 1, YOU)
+        # 標準リバーシ初期配置: (3,3)=白, (4,4)=白, (3,4)=黒, (4,3)=黒
+        black_player = YOU if self.color[YOU] == "black" else COM
+        white_player = YOU if self.color[YOU] == "white" else COM
+        self.drawDisk(mid - 1, mid - 1, white_player)  # (3,3) = white
+        self.drawDisk(mid, mid, white_player)            # (4,4) = white
+        self.drawDisk(mid - 1, mid, black_player)        # (3,4) = black
+        self.drawDisk(mid, mid - 1, black_player)        # (4,3) = black
 
     # 指定された場所に石を配置し、内部データ(self.board)を更新
     def drawDisk(self, x, y, player):
@@ -575,7 +639,10 @@ class Othello:
         x, y = self.last_move
         cx = (x + 0.5) * self.square
         cy = INFO_HEIGHT + (y + 0.5) * self.square
-        self.canvas.create_oval(cx - 18, cy - 18,cx + 18, cy + 18,outline="red",width=3,tags="last_move")
+        highlight_r = self.square * 0.36
+        self.canvas.create_oval(cx - highlight_r, cy - highlight_r,
+                                cx + highlight_r, cy + highlight_r,
+                                outline="red", width=3, tags="last_move")
 
     # 石をひっくり返すアニメーション
     def animate_flip(self, x, y, step=0,new_color=None):
@@ -743,7 +810,8 @@ class Othello:
         self.animating = True
 
         text = f"{name} PASS"
-        self.canvas.create_text(CANVAS_SIZE // 2,INFO_HEIGHT + CANVAS_SIZE // 2,text=text,fill="red",font=("Arial", 36, "bold"),tags="pass")
+        self.canvas.create_text(self.board_size // 2, INFO_HEIGHT + self.board_size // 2,
+                                text=text, fill="red", font=("Arial", 36, "bold"), tags="pass")
 
         def clear_pass():
             self.canvas.delete("pass")
@@ -861,40 +929,44 @@ tk.Radiobutton(difficulty_frame, text="上級", variable=difficulty_var,
 start_button = tk.Button(top_frame, text="START", font=("Arial", 14, "bold"), command=open_janken)
 start_button.pack(side="left", padx=10, pady=5)
 
-# 学習モードボタンと処理
-def start_learning_mode():
-    """学習モードを開始する(バックグラウンドスレッドで実行)"""
-    num_games = 100
-    learn_btn.config(state="disabled")
-    progress_label.config(text="学習中: 0/" + str(num_games))
 
-    def learning_thread():
-        """バックグラウンドで学習を実行するスレッド"""
-        run_self_learning(num_games=num_games, progress_callback=progress_callback)
-        # 完了後UIスレッドで後処理
-        window.after(0, learning_complete)
-
-    def progress_callback(current, total):
-        # UIの更新はメインスレッドで行う
-        window.after(0, lambda c=current, t=total: progress_label.config(text=f"学習中: {c}/{t}"))
-
-    def learning_complete():
-        progress_label.config(text="学習完了!")
-        learn_btn.config(state="normal")
-        messagebox.showinfo("学習モード", f"{num_games}ゲームの自己学習が完了しました。\n重みデータを保存しました。")
-        progress_label.config(text="")
-
-    thread = threading.Thread(target=learning_thread, daemon=True)
-    thread.start()
-
-learn_btn = tk.Button(top_frame, text="学習モード", font=("Arial", 10), command=start_learning_mode)
-learn_btn.pack(side="left", padx=10, pady=5)
-
-progress_label = tk.Label(top_frame, text="", font=("Arial", 10))
-progress_label.pack(side="left", padx=5)
 
 game_frame = tk.Frame(window)
-game_frame.pack()
+game_frame.pack(fill="both", expand=True)
+
+# ヘルプパネル（折りたたみ式）
+help_frame = tk.Frame(window)
+help_frame.pack(fill="x", before=game_frame)
+
+help_visible = tk.BooleanVar(value=False)
+
+def toggle_help():
+    if help_visible.get():
+        help_content.pack_forget()
+        help_toggle_btn.config(text="ヘルプ \u25b6")
+        help_visible.set(False)
+    else:
+        help_content.pack(fill="x", padx=10, pady=(0, 5))
+        help_toggle_btn.config(text="ヘルプ \u25bc")
+        help_visible.set(True)
+
+help_toggle_btn = tk.Button(help_frame, text="ヘルプ \u25b6", font=("Arial", 10),
+                            command=toggle_help, relief="flat", cursor="hand2")
+help_toggle_btn.pack(anchor="w", padx=10, pady=2)
+
+help_text = (
+    "【遊び方】\n"
+    "1. STARTボタンを押してジャンケンで先攻/後攻を決定\n"
+    "2. 黄色い丸(ガイド)が置ける場所です\n"
+    "3. 相手の石を挟める場所にクリックして石を置きます\n"
+    "4. 置ける場所がない場合は自動でパスになります\n"
+    "5. 全マス埋まるか両者置けなくなったら終了\n"
+    "6. 石が多い方の勝ちです"
+)
+help_content = tk.Label(help_frame, text=help_text, font=("Arial", 9),
+                        justify="left", anchor="w", bg="#fffde6",
+                        relief="groove", padx=8, pady=5)
+
 
 othello = Othello(game_frame)
 othello.reset_game(YOU)
