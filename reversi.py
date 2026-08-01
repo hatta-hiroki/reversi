@@ -471,7 +471,7 @@ class Othello:
         self.board_size = CANVAS_SIZE
         self.square = self.board_size // NUM_SQUARE
         self.canvas = tk.Canvas(master, width=CANVAS_SIZE, height=CANVAS_SIZE + INFO_HEIGHT,
-                                bg=BOARD_COLOR, highlightthickness=0)
+                                bg="#d9d9d9", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.last_move = None
         self.player = YOU
@@ -603,7 +603,7 @@ class Othello:
                 ys = INFO_HEIGHT + y * self.square
                 xe = xs + self.square
                 ye = ys + self.square
-                self.canvas.create_rectangle(xs, ys, xe, ye, tags="grid")
+                self.canvas.create_rectangle(xs, ys, xe, ye, fill=BOARD_COLOR, tags="grid")
 
     # 中央の初期石を設置 (標準リバーシ配置: 色で固定)
     def init_stones(self):
@@ -769,6 +769,9 @@ class Othello:
         self.last_move = (x, y)
         flip_color = self.color[self.player]
         self.drawDisk(x, y, self.player)
+        # Update board state immediately (before animation) to fix race condition
+        for rx, ry in reverse_list:
+            self.board[ry][rx]["color"] = flip_color
         self.animate_reverse_rotate(reverse_list,flip_color=flip_color,callback=self.after_animation)
     
     def start_turn(self, player):
