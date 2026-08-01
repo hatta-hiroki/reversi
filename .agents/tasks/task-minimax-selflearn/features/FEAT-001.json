@@ -1,0 +1,35 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Implement minimax with alpha-beta pruning, self-learning weights via self-play, difficulty levels (初級/中級/上級), weight persistence to JSON, and fix the guide display bug",
+  "status": "completed",
+  "steps": [
+    "1. Fix the guide display bug: In reversi.py, change SHOW_GUIDE = False to SHOW_GUIDE = True. The draw_placable() method currently uses self.get_placable_list(YOU) which correctly returns only valid positions - verify this logic is correct. The bug may be that draw_placable() is called when self.player != YOU or during animations. The method already has guards for self.animating and self.player != YOU, so check if those guards are working correctly. Also check if draw_placable is called at wrong times (e.g., after change_turn when player is COM).",
+    "2. Implement minimax with alpha-beta pruning: Add a minimax method to the Othello class (or a separate AI module). The algorithm should: (a) evaluate board positions using a weights table, (b) search to a configurable depth, (c) use alpha-beta pruning for efficiency. The evaluation function should consider: positional weights from the table, mobility (number of moves available), and stone count in endgame. Need a method to simulate placing a stone and get resulting board state without GUI updates.",
+    "3. Add difficulty levels (初級/中級/上級): Add a difficulty selector UI (e.g., radio buttons or dropdown) before game start or in the top frame. Difficulty affects: 初級 (beginner) = depth 1 with default weights (current behavior essentially), 中級 (intermediate) = depth 3 with default weights, 上級 (advanced) = depth 5 with learned weights loaded from JSON file.",
+    "4. Implement self-learning mechanism: Create a learning mode that runs COM vs COM self-play games without GUI. After each game, adjust EVAL_WEIGHTS based on game outcome - increase weights for positions played by the winner, decrease for loser. Use a simple reinforcement approach. The learning should run a configurable number of games (e.g., 100-1000).",
+    "5. Add weight persistence: Save learned weights to a JSON file (e.g., learned_weights.json in the same directory as reversi.py). Load weights on startup if the file exists. The 上級 difficulty should use learned weights if available, falling back to default EVAL_WEIGHTS if not.",
+    "6. Add a 'Learning Mode' button or menu option in the UI that triggers self-play training. Show progress (e.g., 'Training: game 50/100'). After training completes, save weights and show a message.",
+    "7. Update the COM's com() method to use minimax instead of the simple greedy approach. The method should respect the current difficulty level's depth setting and weight table.",
+    "8. Ensure the after_animation and change_turn flow correctly clears/redraws guide markers only when it is YOU's turn and the game is not animating."
+  ],
+  "acceptance_criteria": [
+    "SHOW_GUIDE is True and yellow guide markers appear only on squares where YOU can actually place a stone",
+    "COM uses minimax with alpha-beta pruning instead of simple greedy weight lookup",
+    "Three difficulty levels are selectable via UI: 初級, 中級, 上級 with increasing search depth",
+    "A learning mode button exists that runs self-play and updates weights",
+    "Learned weights are saved to learned_weights.json and loaded on next startup",
+    "上級 mode uses learned weights if available",
+    "python -c \"import py_compile; py_compile.compile('reversi.py', doraise=True)\" passes without errors"
+  ],
+  "verification": [
+    "Run: cd /projects/sandbox/reversi && python -c \"import py_compile; py_compile.compile('reversi.py', doraise=True)\" - must pass",
+    "Run: cd /projects/sandbox/reversi && python -c \"import sys; sys.modules['tkinter'] = type(sys)('mock_tk'); sys.modules['pygame'] = type(sys)('mock_pg'); exec(open('reversi.py').read())\" - check for import errors (may not work due to tkinter usage but syntax should be valid)",
+    "Verify SHOW_GUIDE = True in the source",
+    "Verify minimax function exists with alpha-beta pruning parameters (alpha, beta, depth)",
+    "Verify learned_weights.json save/load functions exist",
+    "Verify difficulty level UI elements exist (初級, 中級, 上級)"
+  ],
+  "blocked_reason": null,
+  "findings": "Guide bug was caused by after_animation() calling draw_placable() redundantly after change_turn() which already triggers start_turn() with proper draw_placable() gating. Fix: removed the extra draw_placable() call from after_animation(). Self-play learning uses depth=2 for speed. pyenv requires python3 command (not python) in this environment. Review fixes applied: (1) moved learning to background thread with after-based UI updates, (2) added epsilon-greedy exploration to self-play, (3) medium difficulty now uses 50% blended learned weights, (4) weight clamping to [-50, 50], (5) removed unused import copy and dead EVAL_WEIGHTS global, (6) added try/except to save_learned_weights."
+}

@@ -1,0 +1,16 @@
+{
+  "task_id": "task-minimax-selflearn",
+  "task_description": "Add minimax with alpha-beta pruning for COM AI, implement self-learning of evaluation weights via self-play, add difficulty levels (初級/中級/上級), persist learned weights to JSON, and fix the guide display bug showing indicators on non-placable squares",
+  "status": "completed",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "pass",
+    "tests": "pass",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "py_compile passes. Simulation logic unit tests pass (placable list generation, stone placement, flipping). All acceptance criteria verified. Semantic review v2: APPROVED."
+  },
+  "review_iterations": 2,
+  "review_verdict": "APPROVED"
+}

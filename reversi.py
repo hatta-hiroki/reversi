@@ -1,6 +1,8 @@
 import os
 import sys
 import random
+import json
+import threading
 import pygame
 import tkinter as tk
 from PIL import ImageTk, Image
@@ -26,8 +28,8 @@ INFO_TEXT_COLOR = "black"   # 上部UIの文字色
 ROCK, SCISSORS, PAPER = "rock", "scissors", "paper"
 RESULT_DISPLAY_TIME = 2000  # ジャンケン結果表示タイマー(ms)
 
-# 盤面の評価重みテーブル
-EVAL_WEIGHTS = [
+# 盤面の評価重みテーブル(デフォルト)
+DEFAULT_EVAL_WEIGHTS = [
     [ 30, -12,  0, -1, -1,  0, -12,  30],
     [-12, -15, -3, -3, -3, -3, -15, -12],
     [  0,  -3,  0, -1, -1,  0,  -3,   0],
@@ -37,6 +39,32 @@ EVAL_WEIGHTS = [
     [-12, -15, -3, -3, -3, -3, -15, -12],
     [ 30, -12,  0, -1, -1,  0, -12,  30],
 ]
+
+# 学習済み重みファイルパス
+LEARNED_WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "learned_weights.json")
+
+# 学習済み重みの読み込み
+def load_learned_weights():
+    if os.path.exists(LEARNED_WEIGHTS_PATH):
+        try:
+            with open(LEARNED_WEIGHTS_PATH, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return None
+    return None
+
+# 学習済み重みの保存
+def save_learned_weights(weights):
+    try:
+        with open(LEARNED_WEIGHTS_PATH, "w") as f:
+            json.dump(weights, f, indent=2)
+    except (IOError, OSError) as e:
+        print(f"Warning: Could not save learned weights: {e}")
+
+# 難易度設定
+DIFFICULTY_BEGINNER = 1   # 初級: depth=1
+DIFFICULTY_MEDIUM = 3     # 中級: depth=3
+DIFFICULTY_ADVANCED = 5   # 上級: depth=5
 
 #pygameのミキサーを初期化
 pygame.mixer.pre_init(44100, -16, 2, 512)
@@ -55,8 +83,8 @@ def resource_path(relative_path):
 IMG_DIR = resource_path("image")
 SOUND_DIR = resource_path("sounds")
 
-# ガイド非表示(諸事情により非表示に設定)
-SHOW_GUIDE = False
+# ガイド表示
+SHOW_GUIDE = True
 
 # 音声ファイル読み込み
 def safe_load_sound(filename):
@@ -81,9 +109,262 @@ if os.path.exists(bgm_path):
     pygame.mixer.music.set_volume(0.2)
     pygame.mixer.music.play(-1)
 
+# ===== Minimax AI エンジン (GUIに依存しない純粋なロジック) =====
+
+def get_board_colors(board):
+    """GUI盤面から色情報のみの2D配列を作成する"""
+    result = [[None] * NUM_SQUARE for _ in range(NUM_SQUARE)]
+    for y in range(NUM_SQUARE):
+        for x in range(NUM_SQUARE):
+            cell = board[y][x]
+            if cell is not None:
+                result[y][x] = cell["color"]
+    return result
+
+
+def sim_get_reverse_list(board_colors, x, y, player_color, opponent_color):
+    """シミュレーション用: ひっくり返せる石のリストを取得"""
+    if board_colors[y][x] is not None:
+        return []
+
+    reverse_list = []
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            tx, ty = x + dx, y + dy
+            temp = []
+            while 0 <= tx < NUM_SQUARE and 0 <= ty < NUM_SQUARE:
+                cell = board_colors[ty][tx]
+                if cell is None:
+                    break
+                if cell == opponent_color:
+                    temp.append((tx, ty))
+                elif cell == player_color:
+                    reverse_list.extend(temp)
+                    break
+                else:
+                    break
+                tx += dx
+                ty += dy
+    return reverse_list
+
+
+def sim_get_placable_list(board_colors, player_color, opponent_color):
+    """シミュレーション用: 置ける場所のリストを取得"""
+    lst = []
+    for y in range(NUM_SQUARE):
+        for x in range(NUM_SQUARE):
+            if board_colors[y][x] is None:
+                if sim_get_reverse_list(board_colors, x, y, player_color, opponent_color):
+                    lst.append((x, y))
+    return lst
+
+
+def sim_place(board_colors, x, y, player_color, opponent_color):
+    """シミュレーション用: 石を置いてひっくり返した新しい盤面を返す"""
+    new_board = [row[:] for row in board_colors]
+    reverse_list = sim_get_reverse_list(new_board, x, y, player_color, opponent_color)
+    new_board[y][x] = player_color
+    for rx, ry in reverse_list:
+        new_board[ry][rx] = player_color
+    return new_board
+
+
+def evaluate_board(board_colors, com_color, you_color, weights):
+    """盤面を評価する (COMから見たスコア)"""
+    score = 0
+    com_count = 0
+    you_count = 0
+    empty_count = 0
+
+    for y in range(NUM_SQUARE):
+        for x in range(NUM_SQUARE):
+            cell = board_colors[y][x]
+            if cell == com_color:
+                score += weights[y][x]
+                com_count += 1
+            elif cell == you_color:
+                score -= weights[y][x]
+                you_count += 1
+            else:
+                empty_count += 1
+
+    # モビリティ(手数)の評価
+    com_moves = len(sim_get_placable_list(board_colors, com_color, you_color))
+    you_moves = len(sim_get_placable_list(board_colors, you_color, com_color))
+    score += (com_moves - you_moves) * 2
+
+    # 終盤は石の数を重視
+    total_stones = com_count + you_count
+    if total_stones > 50:
+        score += (com_count - you_count) * 3
+
+    return score
+
+
+def minimax(board_colors, depth, alpha, beta, maximizing, com_color, you_color, weights):
+    """Minimax with alpha-beta pruning"""
+    if maximizing:
+        current_color = com_color
+        opponent_color = you_color
+    else:
+        current_color = you_color
+        opponent_color = com_color
+
+    placable = sim_get_placable_list(board_colors, current_color, opponent_color)
+
+    # 終端条件: 深さ0またはゲーム終了
+    if depth == 0:
+        return evaluate_board(board_colors, com_color, you_color, weights), None
+
+    if not placable:
+        # パス: 相手のターンを確認
+        opponent_placable = sim_get_placable_list(board_colors, opponent_color, current_color)
+        if not opponent_placable:
+            # 両者置けない = ゲーム終了
+            return evaluate_board(board_colors, com_color, you_color, weights), None
+        # パスして相手のターン
+        score, _ = minimax(board_colors, depth - 1, alpha, beta,
+                           not maximizing, com_color, you_color, weights)
+        return score, None
+
+    best_move = None
+
+    if maximizing:
+        max_eval = float('-inf')
+        for x, y in placable:
+            new_board = sim_place(board_colors, x, y, current_color, opponent_color)
+            eval_score, _ = minimax(new_board, depth - 1, alpha, beta,
+                                    False, com_color, you_color, weights)
+            if eval_score > max_eval:
+                max_eval = eval_score
+                best_move = (x, y)
+            alpha = max(alpha, eval_score)
+            if beta <= alpha:
+                break
+        return max_eval, best_move
+    else:
+        min_eval = float('inf')
+        for x, y in placable:
+            new_board = sim_place(board_colors, x, y, current_color, opponent_color)
+            eval_score, _ = minimax(new_board, depth - 1, alpha, beta,
+                                    True, com_color, you_color, weights)
+            if eval_score < min_eval:
+                min_eval = eval_score
+                best_move = (x, y)
+            beta = min(beta, eval_score)
+            if beta <= alpha:
+                break
+        return min_eval, best_move
+
+
+# ===== 自己学習エンジン =====
+
+def self_play_game(weights, epsilon=0.1):
+    """GUIなしでCOM vs COMの1ゲームを実行し、各プレイヤーが置いた場所を記録"""
+    board = [[None] * NUM_SQUARE for _ in range(NUM_SQUARE)]
+    mid = NUM_SQUARE // 2
+
+    # 初期配置 (blackが先手)
+    board[mid - 1][mid - 1] = "white"
+    board[mid][mid] = "white"
+    board[mid - 1][mid] = "black"
+    board[mid][mid - 1] = "black"
+
+    black_color = "black"
+    white_color = "white"
+    current_color = black_color
+    opponent_color = white_color
+
+    black_moves = []
+    white_moves = []
+    pass_count = 0
+
+    while pass_count < 2:
+        placable = sim_get_placable_list(board, current_color, opponent_color)
+
+        if not placable:
+            pass_count += 1
+            current_color, opponent_color = opponent_color, current_color
+            continue
+
+        pass_count = 0
+
+        # epsilon-greedy: 探索多様性のためにランダムな手を選ぶことがある
+        if random.random() < epsilon:
+            best_move = random.choice(placable)
+        else:
+            # depth=2 で探索 (学習速度と品質のバランス)
+            _, best_move = minimax(board, 2, float('-inf'), float('inf'),
+                                   True, current_color, opponent_color, weights)
+
+            if best_move is None:
+                best_move = random.choice(placable)
+
+        x, y = best_move
+        board = sim_place(board, x, y, current_color, opponent_color)
+
+        if current_color == black_color:
+            black_moves.append((x, y))
+        else:
+            white_moves.append((x, y))
+
+        current_color, opponent_color = opponent_color, current_color
+
+    # 石数を計算
+    black_count = sum(1 for y in range(NUM_SQUARE) for x in range(NUM_SQUARE) if board[y][x] == black_color)
+    white_count = sum(1 for y in range(NUM_SQUARE) for x in range(NUM_SQUARE) if board[y][x] == white_color)
+
+    return black_count, white_count, black_moves, white_moves
+
+
+def run_self_learning(num_games=100, progress_callback=None):
+    """自己学習を実行し、重みテーブルを更新する"""
+    learned = load_learned_weights()
+    if learned is None:
+        weights = [row[:] for row in DEFAULT_EVAL_WEIGHTS]
+    else:
+        weights = [row[:] for row in learned]
+
+    learning_rate = 0.5
+    weight_min = -50.0
+    weight_max = 50.0
+
+    for game_idx in range(num_games):
+        black_count, white_count, black_moves, white_moves = self_play_game(weights, epsilon=0.1)
+
+        # 勝者の手の位置の重みを増加、敗者の手の位置の重みを減少
+        if black_count > white_count:
+            winner_moves = black_moves
+            loser_moves = white_moves
+        elif white_count > black_count:
+            winner_moves = white_moves
+            loser_moves = black_moves
+        else:
+            # 引き分けの場合は更新しない
+            if progress_callback:
+                progress_callback(game_idx + 1, num_games)
+            continue
+
+        for x, y in winner_moves:
+            weights[y][x] = min(weight_max, weights[y][x] + learning_rate)
+        for x, y in loser_moves:
+            weights[y][x] = max(weight_min, weights[y][x] - learning_rate)
+
+        if progress_callback:
+            progress_callback(game_idx + 1, num_games)
+
+    # 重みを保存
+    save_learned_weights(weights)
+    return weights
+
 window = tk.Tk()
 window.title("reversi")
 window.geometry("700x500")
+
+# 難易度の状態変数(tkinter IntVar は後で初期化)
+difficulty_var = None
 
 # ジャンケンロジック
 def open_janken():
@@ -216,7 +497,6 @@ class Othello:
         self.canvas.create_text(CANVAS_SIZE * 3 // 4, 18,text=f"COM : {com_mark} {com_color.upper()}",fill=INFO_TEXT_COLOR,font=("Arial", 14, "bold"),tags="color_info")
     
     # 石が置ける場所の表示
-    # 現在は諸事情により非表示に設定
     def draw_placable(self):
         if not SHOW_GUIDE:
             self.canvas.delete("guide")
@@ -455,9 +735,6 @@ class Othello:
     def after_animation(self):
         self.animating = False
         self.change_turn()
-        
-        if self.player == YOU:
-            self.draw_placable()
 
     # パス時のメッセージ
     def show_pass(self, player):
@@ -505,32 +782,116 @@ class Othello:
         self.canvas.delete("guide")
         placable = self.get_placable_list(COM)
 
-        best_score = -9999
-        best_moves = []
+        if not placable:
+            return
 
-        # すべての置ける場所を評価する
-        for x, y in placable:
-            # 基本スコア = マスの重み
-            score = EVAL_WEIGHTS[y][x]
+        # 難易度に応じた探索深さと重みを選択
+        depth = self.get_com_depth()
+        weights = self.get_com_weights()
 
-            if score > best_score:
-                best_score = score
-                best_moves = [(x, y)]
-            elif score == best_score:
-                best_moves.append((x, y))
+        com_color = self.color[COM]
+        you_color = self.color[YOU]
 
-        # 最高スコアの中からランダムに1つ選ぶ
-        x, y = random.choice(best_moves)
+        # 盤面の色情報を取得
+        board_colors = get_board_colors(self.board)
+
+        # Minimaxで最善手を探索
+        _, best_move = minimax(board_colors, depth, float('-inf'), float('inf'),
+                               True, com_color, you_color, weights)
+
+        if best_move is None:
+            # フォールバック: ランダム選択
+            best_move = random.choice(placable)
+
+        x, y = best_move
         self.place(x, y)
         self.highlight_flash()
+
+    def get_com_depth(self):
+        """現在の難易度に応じた探索深さを返す"""
+        global difficulty_var
+        if difficulty_var is None:
+            return DIFFICULTY_BEGINNER
+        level = difficulty_var.get()
+        return level
+
+    def get_com_weights(self):
+        """現在の難易度に応じた重みテーブルを返す"""
+        global difficulty_var
+        if difficulty_var is None:
+            return DEFAULT_EVAL_WEIGHTS
+        level = difficulty_var.get()
+        if level == DIFFICULTY_ADVANCED:
+            learned = load_learned_weights()
+            if learned is not None:
+                return learned
+        elif level == DIFFICULTY_MEDIUM:
+            # 中級: 学習済み重みを50%ブレンド(デフォルトと学習済みの中間)
+            learned = load_learned_weights()
+            if learned is not None:
+                blended = []
+                for y in range(NUM_SQUARE):
+                    row = []
+                    for x in range(NUM_SQUARE):
+                        val = (DEFAULT_EVAL_WEIGHTS[y][x] + learned[y][x]) / 2.0
+                        row.append(val)
+                    blended.append(row)
+                return blended
+        return DEFAULT_EVAL_WEIGHTS
 
 # メイン
 window.title("Othello")
 top_frame = tk.Frame(window)
 top_frame.pack(fill="x")
 
-start_button = tk.Button(top_frame,text="START",font=("Arial", 14, "bold"),command=open_janken)
-start_button.pack(pady=5)
+# 難易度選択
+difficulty_var = tk.IntVar(value=DIFFICULTY_BEGINNER)
+
+difficulty_frame = tk.Frame(top_frame)
+difficulty_frame.pack(side="left", padx=10, pady=5)
+
+tk.Label(difficulty_frame, text="難易度:", font=("Arial", 10)).pack(side="left")
+tk.Radiobutton(difficulty_frame, text="初級", variable=difficulty_var,
+               value=DIFFICULTY_BEGINNER, font=("Arial", 10)).pack(side="left")
+tk.Radiobutton(difficulty_frame, text="中級", variable=difficulty_var,
+               value=DIFFICULTY_MEDIUM, font=("Arial", 10)).pack(side="left")
+tk.Radiobutton(difficulty_frame, text="上級", variable=difficulty_var,
+               value=DIFFICULTY_ADVANCED, font=("Arial", 10)).pack(side="left")
+
+start_button = tk.Button(top_frame, text="START", font=("Arial", 14, "bold"), command=open_janken)
+start_button.pack(side="left", padx=10, pady=5)
+
+# 学習モードボタンと処理
+def start_learning_mode():
+    """学習モードを開始する(バックグラウンドスレッドで実行)"""
+    num_games = 100
+    learn_btn.config(state="disabled")
+    progress_label.config(text="学習中: 0/" + str(num_games))
+
+    def learning_thread():
+        """バックグラウンドで学習を実行するスレッド"""
+        run_self_learning(num_games=num_games, progress_callback=progress_callback)
+        # 完了後UIスレッドで後処理
+        window.after(0, learning_complete)
+
+    def progress_callback(current, total):
+        # UIの更新はメインスレッドで行う
+        window.after(0, lambda c=current, t=total: progress_label.config(text=f"学習中: {c}/{t}"))
+
+    def learning_complete():
+        progress_label.config(text="学習完了!")
+        learn_btn.config(state="normal")
+        messagebox.showinfo("学習モード", f"{num_games}ゲームの自己学習が完了しました。\n重みデータを保存しました。")
+        progress_label.config(text="")
+
+    thread = threading.Thread(target=learning_thread, daemon=True)
+    thread.start()
+
+learn_btn = tk.Button(top_frame, text="学習モード", font=("Arial", 10), command=start_learning_mode)
+learn_btn.pack(side="left", padx=10, pady=5)
+
+progress_label = tk.Label(top_frame, text="", font=("Arial", 10))
+progress_label.pack(side="left", padx=5)
 
 game_frame = tk.Frame(window)
 game_frame.pack()
