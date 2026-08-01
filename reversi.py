@@ -499,6 +499,10 @@ class Othello:
 
     def _do_resize(self, new_board_size):
         self._resize_after_id = None
+        if self.animating:
+            # アニメーション中はリサイズを遅延
+            self._resize_after_id = self.master.after(200, lambda: self._do_resize(new_board_size))
+            return
         self.board_size = new_board_size
         self.square = self.board_size // NUM_SQUARE
         self.redraw_all()
