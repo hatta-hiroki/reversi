@@ -9,6 +9,8 @@
     "tests": "pass",
     "test_quality": "pass",
     "docker_build": "skipped",
-    "summary": "py_compile passes. Simulation logic unit tests pass (placable list generation, stone placement, flipping). All acceptance criteria verified via grep: SHOW_GUIDE=True, minimax with alpha-beta exists, difficulty UI (初級/中級/上級), learning mode button, weight persistence functions."
-  }
+    "summary": "py_compile passes. Simulation logic unit tests pass (placable list generation, stone placement, flipping). All acceptance criteria verified. Semantic review v2: APPROVED."
+  },
+  "review_iterations": 2,
+  "review_verdict": "APPROVED"
 }
